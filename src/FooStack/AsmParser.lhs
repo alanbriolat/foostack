@@ -1,28 +1,43 @@
 > module FooStack.AsmParser where
 
 > import Data.List (elemIndex)
-> import Control.Applicative ((<$>))
-> import Text.ParserCombinators.Parsec
-> import qualified Text.ParserCombinators.Parsec.Token as Token
-> import qualified Text.ParserCombinators.Parsec.Language as Language
+> import Data.Char (toUpper)
+> import Control.Applicative ((<$>), (<*))
+> import Text.ParserCombinators.Parsec hiding (label, space, spaces)
 
 > import FooStack.Asm
 
-Let's use Parsec's useful language definition stuff!
+Basic identifier parsing: alphanumeric plus underscore, but not starting with a
+number.
 
-> def = Language.emptyDef { Language.commentLine   = ";"
->                         , Language.identStart    = letter <|> char '_'
->                         , Language.identLetter   = alphaNum <|> char '_'
->                         , Language.caseSensitive = False
->                         }
-> lexer = Token.makeTokenParser def
+> identifier :: Parser String
+> identifier = do first <- (letter <|> char '_')
+>                 rest <- (many $ alphaNum <|> char '_')
+>                 return (first:rest)
+>              <?> "identifier"
 
-Some utility functions based on the language definition:
+The identifier parser is sufficient for parsing instruction names; validity of
+the instruction name can be sorted once we're sure we're trying to treat it as
+an instruction.
 
-> integer    = Token.integer lexer
-> identifier = Token.identifier lexer
-> lexeme     = Token.lexeme lexer
-> whiteSpace = Token.whiteSpace lexer
+> instruction :: Parser String
+> instruction = identifier
+
+The identifier parser is also sufficient for label names.  Labels are signified
+by a separating colon before the code they refer to.
+
+> label :: Parser String
+> label = identifier <* (spaces >> char ':')
+
+We're going to deal with whitespace a lot, and our definition varies a bit from
+Parsec's.
+
+> space :: Parser Char
+> space = char ' ' <|> char '\t'
+> spaces :: Parser [Char]
+> spaces = many space
+> spaces1 :: Parser [Char]
+> spaces1 = many1 space
 
 Let's work from the top down.  Firstly we need a single type to represent all
 available code elements - there are more than just instructions!
@@ -31,48 +46,68 @@ available code elements - there are more than just instructions!
 >              | Label String
 >              deriving (Show)
 
-At the top level, we are parsing on a line-by-line basis:
+At the top level, we are parsing on a line-by-line basis.  Each line must
+therefore have at least one newline character between it and the next line.
 
 > parseAsm :: Parser [Element]
-> parseAsm = concat <$> parseLine `sepBy1` (many1 newline)
+> parseAsm = concat <$> parseLine `sepBy` (many1 newline)
 
-Each line consists of either a label, an operation, or both:
+Each line consists of either a label, an operation, or both.  This gives us the
+flexibility of multiple labels for the same location, e.g. a subroutine that
+starts with a loop.
 
 > parseLine :: Parser [Element]
-> parseLine = concat <$> sequence [ try parseLabel <|> return []
->                                 , try parseInstruction <|> return []
+> parseLine = concat <$> sequence [ spaces >> (try parseLabel <|> return [])
+>                                 , spaces >> (try parseInstruction <|> return [])
 >                                 ]
 
-A label is an identifier string ending with a colon:
-
 > parseLabel :: Parser [Element]
-> parseLabel = do i <- identifier
->                 char ':'
->                 return [Label i]
->          <|> return []
+> parseLabel = (:[]) <$> Label <$> label
 
 > parseInstruction :: Parser [Element]
-> parseInstruction = identifier >>= parseOp
+> parseInstruction = instruction >> return [Op (SET (Lit 0) (Lit 0))]
 
-> parseOp :: String -> Parser [Element]
-> parseOp op = return []
+ parseInstruction :: Parser [Element]
+ parseInstruction = uppercase <$> identifier >>= parseOp
+     where
+     uppercase :: String -> String
+     uppercase = map toUpper
+
+ buildOp1 :: (Operand -> Op) -> Parser [Element]
+ buildOp1 op = do a <- parseOperand
+                  return [(Op (op a))]
+ buildOp2 :: (Operand -> Operand -> Op) -> Parser [Element]
+ buildOp2 op = do a <- parseOperand
+                  b <- parseOperand
+                  return [(Op (op a b))]
+ parseOp :: String -> Parser [Element]
+ parseOp "SET"  = buildOp2 SET
+ parseOp "ADD"  = buildOp2 SET
+ parseOp "SUB"  = buildOp2 SET
+ parseOp "MUL"  = buildOp2 SET
+ parseOp "SHL"  = buildOp2 SET
+ parseOp "SHR"  = buildOp2 SET
+ parseOp "AND"  = buildOp2 SET
+ parseOp "BOR"  = buildOp2 SET
+ parseOp "XOR"  = buildOp2 SET
+ parseOp _      = fail "unknown instruction"
 
 Probably the most basic element: a parser for valid operands.
 
-> parseOperand :: Parser Operand
-> parseOperand = parseIdentifier <|> parseLiteral <?> "operand"
-> parseIdentifier :: Parser Operand
-> parseIdentifier = do modechar <- oneOf "#%@"
->                      regchar <- lexeme (oneOf registers)
->                      case regchar `elemIndex` registers of
->                           Just r -> case modechar of
->                                          '#' -> return (Reg r)
->                                          '%' -> return (Frame r)
->                                          '@' -> return (Addr r)
->                   <?> "identifier"
-> -- TODO: range check
-> parseLiteral :: Parser Operand
-> parseLiteral = (Lit . fromIntegral) <$> integer
+ parseOperand :: Parser Operand
+ parseOperand = parseIdentifier <|> parseLiteral <?> "operand"
+ parseIdentifier :: Parser Operand
+ parseIdentifier = do modechar <- oneOf "#%@"
+                      regchar <- lexeme (oneOf registers)
+                      case regchar `elemIndex` registers of
+                           Just r -> case modechar of
+                                          '#' -> return (Reg r)
+                                          '%' -> return (Frame r)
+                                          '@' -> return (Addr r)
+                   <?> "identifier"
+ -- TODO: range check
+ parseLiteral :: Parser Operand
+ parseLiteral = (Lit . fromIntegral) <$> integer
 
 Parse an operation.  This returns a list of operations because some
 instructions have a second argument which is a data word.
