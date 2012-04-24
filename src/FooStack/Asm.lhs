@@ -17,7 +17,7 @@ Some things these requirments might suggest:
 > module FooStack.Asm where
 > import Data.Binary.Put (putWord16be, Put, runPut)
 > import Data.ByteString.Lazy (ByteString)
-> import Data.Bits ((.|.), (.&.), shiftL)
+> import Data.Bits ((.|.), (.&.), shiftL, shiftR)
 
 A register identifier is an integer from 0 to 15.
 
@@ -61,54 +61,78 @@ that leaves us 2 bits for addressing mode.
 >              | Addr Register      -- 11xxxx: memory location #a
 >              deriving (Show)
 
-Define the binary opcodes:
-
-> opcode :: Op -> Int
-> opcode (EXT e)   = shiftL (extopcode e) 4
-> opcode (SET _ _) = 0x1
-> opcode (ADD _ _) = 0x2
-> opcode (SUB _ _) = 0x3
-> opcode (MUL _ _) = 0x4
-> opcode (SHL _ _) = 0x5
-> opcode (SHR _ _) = 0x6
-> opcode (AND _ _) = 0x7
-> opcode (BOR _ _) = 0x8
-> opcode (XOR _ _) = 0x9
-
-... and also for extended opcodes:
-
-> extopcode :: ExtOp -> Int
-> extopcode (LOAD _) = 0x01
-> extopcode (PUSH _) = 0x02
-> extopcode (POP _)  = 0x03
-> extopcode (PEEK _) = 0x04
-
 Define the binary representations of operands:
 
-> operand :: Operand -> Int
-> operand (Lit a)   = a .&. 0xF
-> operand (Reg r)   = 0x10 .|. (r .&. 0xF)
-> operand (Frame r) = 0x20 .|. (r .&. 0xF)
-> operand (Addr r)  = 0x30 .|. (r .&. 0xF)
+> encodeOperand :: Operand -> Int
+> encodeOperand = encode
+>     where
+>     combine :: Int -> Int -> Int
+>     combine mode a = ((mode .&. 0x3) `shiftL` 4) .|. (a .&. 0xF)
+>     encode :: Operand -> Int
+>     encode (Lit a)   = combine 0x0 a
+>     encode (Reg r)   = combine 0x1 r
+>     encode (Frame r) = combine 0x2 r
+>     encode (Addr r)  = combine 0x3 r
 
-Define the binary representation of operations:
+Define the binary representation of instructions.  To recap, the basic
+instruction format is bbbbbbaaaaaaoooo.  Extended instructions are
+aaaaaaoooooo0000.  The special case of a "data" operation is just a 16-bit
+literal.
 
-> op2 :: Int -> Operand -> Operand -> Int
-> op2 opcode a b = opcode .|. (shiftL (operand a) 4) .|. (shiftL (operand b) 10)
-> op1 :: Int -> Operand -> Int
-> op1 opcode a = opcode .|. (shiftL (operand a) 10)
-> op :: Op -> Int
-> op o@(SET a b)      = op2 (opcode o) a b
-> op o@(ADD a b)      = op2 (opcode o) a b
-> op o@(SUB a b)      = op2 (opcode o) a b
-> op o@(MUL a b)      = op2 (opcode o) a b
-> op o@(SHL a b)      = op2 (opcode o) a b
-> op o@(SHR a b)      = op2 (opcode o) a b
-> op o@(AND a b)      = op2 (opcode o) a b
-> op o@(BOR a b)      = op2 (opcode o) a b
-> op o@(XOR a b)      = op2 (opcode o) a b
-> op (Data a)         = a .&. 0xFF
-> op o@(EXT (LOAD a)) = op1 (opcode o) a
-> op o@(EXT (PUSH a)) = op1 (opcode o) a
-> op o@(EXT (POP a))  = op1 (opcode o) a
-> op o@(EXT (PEEK a)) = op1 (opcode o) a
+> encodeOp :: Op -> Int
+> encodeOp = encode
+>     where
+>     combine :: Int -> Int -> Int -> Int
+>     combine o a b = (o .&. 0xF) .|. ((a .&. 0x3F) `shiftL` 4) .|. ((b .&. 0x3F) `shiftL` 10)
+>     encode :: Op -> Int
+>     encode (SET a b) = combine 0x1 (encodeOperand a) (encodeOperand b)
+>     encode (ADD a b) = combine 0x2 (encodeOperand a) (encodeOperand b)
+>     encode (SUB a b) = combine 0x3 (encodeOperand a) (encodeOperand b)
+>     encode (MUL a b) = combine 0x4 (encodeOperand a) (encodeOperand b)
+>     encode (SHL a b) = combine 0x5 (encodeOperand a) (encodeOperand b)
+>     encode (SHR a b) = combine 0x6 (encodeOperand a) (encodeOperand b)
+>     encode (AND a b) = combine 0x7 (encodeOperand a) (encodeOperand b)
+>     encode (BOR a b) = combine 0x8 (encodeOperand a) (encodeOperand b)
+>     encode (XOR a b) = combine 0x9 (encodeOperand a) (encodeOperand b)
+>     encode (Data a)  = a .&. 0xFFFF
+>     encode (EXT (LOAD a)) = combine 0x0 0x01 (encodeOperand a)
+>     encode (EXT (PUSH a)) = combine 0x0 0x02 (encodeOperand a)
+>     encode (EXT (POP  a)) = combine 0x0 0x03 (encodeOperand a)
+>     encode (EXT (PEEK a)) = combine 0x0 0x04 (encodeOperand a)
+
+Decode an operand:
+
+> decodeOperand :: Int -> Operand
+> decodeOperand = decode . split
+>     where
+>     split :: Int -> (Int, Int)
+>     split a = ((a .&. 0x30) `shiftR` 4, a .&. 0xF)
+>     decode :: (Int, Int) -> Operand
+>     decode (0x0, a) = Lit a
+>     decode (0x1, r) = Reg r
+>     decode (0x2, r) = Frame r
+>     decode (0x3, r) = Addr r
+
+Decode an instruction.  Note that we can't decode data instructions because
+there is nothing to mark them as such.  When reading a binary, we need to make
+sure we handle instructions that are followed by data and read the data in.
+
+> decodeOp :: Int -> Op
+> decodeOp = decode . split
+>     where
+>     split :: Int -> (Int, Int, Int)
+>     split inst = (inst .&. 0xF, (inst `shiftR` 4) .&. 0x3F, (inst `shiftR` 10) .&. 0x3F)
+>     decode :: (Int, Int, Int) -> Op
+>     decode (0x1, a, b) = SET (decodeOperand a) (decodeOperand b)
+>     decode (0x2, a, b) = ADD (decodeOperand a) (decodeOperand b)
+>     decode (0x3, a, b) = SUB (decodeOperand a) (decodeOperand b)
+>     decode (0x4, a, b) = MUL (decodeOperand a) (decodeOperand b)
+>     decode (0x5, a, b) = SHL (decodeOperand a) (decodeOperand b)
+>     decode (0x6, a, b) = SHR (decodeOperand a) (decodeOperand b)
+>     decode (0x7, a, b) = AND (decodeOperand a) (decodeOperand b)
+>     decode (0x8, a, b) = BOR (decodeOperand a) (decodeOperand b)
+>     decode (0x9, a, b) = XOR (decodeOperand a) (decodeOperand b)
+>     decode (0x0, 0x01, a) = EXT (LOAD (decodeOperand a))
+>     decode (0x0, 0x02, a) = EXT (PUSH (decodeOperand a))
+>     decode (0x0, 0x03, a) = EXT (POP  (decodeOperand a))
+>     decode (0x0, 0x04, a) = EXT (PEEK (decodeOperand a))
