@@ -23,6 +23,12 @@ A register identifier is an integer from 0 to 15.
 
 > type Register = Int
 
+Registers should be referred to in code by a single-letter alias.  The final 4
+should be used as "argument registers", hence the separate naming.
+
+> registers :: [Char]
+> registers = "abcdefghijklwxyz"
+
 Borrowing DCPU-16's instruction format, bbbbbbaaaaaaoooo.  That is, a 4-bit
 opcode and two 6-bit operands.
 
