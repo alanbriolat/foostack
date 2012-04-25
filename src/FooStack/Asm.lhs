@@ -18,15 +18,17 @@ Some things these requirments might suggest:
 > import Data.Binary.Put (putWord16be, Put, runPut)
 > import Data.ByteString.Lazy (ByteString)
 > import Data.Bits ((.|.), (.&.), shiftL, shiftR)
+> import Data.List (elemIndex)
+> import Data.Maybe (fromJust)
 
 A register identifier is an integer from 0 to 15.
 
-> type Register = Int
+> type Register = Char
 
 Registers should be referred to in code by a single-letter alias.  The final 4
 should be used as "argument registers", hence the separate naming.
 
-> registers :: [Char]
+> registers :: [Register]
 > registers = "abcdefghijklwxyz"
 
 Borrowing DCPU-16's instruction format, bbbbbbaaaaaaoooo.  That is, a 4-bit
@@ -42,7 +44,7 @@ opcode and two 6-bit operands.
 >         | AND Operand Operand     -- 0x7, set a = a & b
 >         | BOR Operand Operand     -- 0x8, set a = a | b
 >         | XOR Operand Operand     -- 0x9, set a = a ^ b
->         | Data Int                -- a raw 16-bit integer
+>         | DATA Int                -- a raw 16-bit integer
 >         deriving (Show)
 
 To achieve a larger range of available opcodes, the "extended" opcodes are
@@ -62,9 +64,9 @@ have 6 bits to play with.  If we want a reasonable number of registers (16),
 that leaves us 2 bits for addressing mode.
 
 > data Operand = Lit Int            -- 00xxxx: short literals (-8 to +7)
->              | Reg Register       -- 01xxxx: value in register #a
->              | Frame Register     -- 10xxxx: memory location FP + #a
->              | Addr Register      -- 11xxxx: memory location #a
+>              | Reg Register       -- 01xxxx: r = register r
+>              | Frame Register     -- 10xxxx: $r = memory location [FP + r]
+>              | Addr Register      -- 11xxxx: @r = memory location [r]
 >              deriving (Show)
 
 Define the binary representations of operands:
@@ -76,9 +78,9 @@ Define the binary representations of operands:
 >     combine mode a = ((mode .&. 0x3) `shiftL` 4) .|. (a .&. 0xF)
 >     encode :: Operand -> Int
 >     encode (Lit a)   = combine 0x0 a
->     encode (Reg r)   = combine 0x1 r
->     encode (Frame r) = combine 0x2 r
->     encode (Addr r)  = combine 0x3 r
+>     encode (Reg r)   = combine 0x1 $ fromJust $ r `elemIndex` registers
+>     encode (Frame r) = combine 0x2 $ fromJust $ r `elemIndex` registers
+>     encode (Addr r)  = combine 0x3 $ fromJust $ r `elemIndex` registers
 
 Define the binary representation of instructions.  To recap, the basic
 instruction format is bbbbbbaaaaaaoooo.  Extended instructions are
@@ -100,7 +102,7 @@ literal.
 >     encode (AND a b) = combine 0x7 (encodeOperand a) (encodeOperand b)
 >     encode (BOR a b) = combine 0x8 (encodeOperand a) (encodeOperand b)
 >     encode (XOR a b) = combine 0x9 (encodeOperand a) (encodeOperand b)
->     encode (Data a)  = a .&. 0xFFFF
+>     encode (DATA a)  = a .&. 0xFFFF
 >     encode (EXT (LOAD a)) = combine 0x0 0x01 (encodeOperand a)
 >     encode (EXT (PUSH a)) = combine 0x0 0x02 (encodeOperand a)
 >     encode (EXT (POP  a)) = combine 0x0 0x03 (encodeOperand a)
@@ -115,9 +117,9 @@ Decode an operand:
 >     split a = ((a .&. 0x30) `shiftR` 4, a .&. 0xF)
 >     decode :: (Int, Int) -> Operand
 >     decode (0x0, a) = Lit a
->     decode (0x1, r) = Reg r
->     decode (0x2, r) = Frame r
->     decode (0x3, r) = Addr r
+>     decode (0x1, r) = Reg $ registers !! r
+>     decode (0x2, r) = Frame $ registers !! r
+>     decode (0x3, r) = Addr $ registers !! r
 
 Decode an instruction.  Note that we can't decode data instructions because
 there is nothing to mark them as such.  When reading a binary, we need to make
