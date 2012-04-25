@@ -1,0 +1,28 @@
+; An example assembly file
+
+main:   load    a, 0x000F       ; example line comment
+        set     b, a
+        shl     b, 4
+
+multiple:
+labels: 
+        bor     a, b            ; a should now be 0x00FF
+        load    c, multiple
+        load    d, labels       ; c == d
+
+; Traverse the below data segment, loading it into w, x, y, z
+        load    a, some_data
+        set     w, @a
+        add     a, 1
+        set     x, @a
+        add     a, 1
+        set     y, @a
+        add     a, 1
+        set     z, @a
+
+; An example chunk of data
+some_data:
+        data    0x000F
+        data    0x00F0
+        data    0x0F00
+        data    0xF000
