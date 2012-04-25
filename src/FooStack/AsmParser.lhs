@@ -113,7 +113,7 @@ therefore have at least one newline character between it and the next line.
 Using "spaces" consumes end-of-line whitespace.
 
 > parseAsm :: Parser [Element]
-> parseAsm = concat <$> parseLine `sepEndBy` lineending
+> parseAsm = concat <$> parseLine `sepEndBy` lineending <* eof
 
 Each line consists of either a lone assembler directive, or a label,
 instruction, or both.  This gives us the flexibility of multiple labels for the
@@ -226,4 +226,4 @@ TODO: range check literals -2^31 to 2^31-1.
 If we run this module as a program, it will attempt to parse stdin and write
 the resulting [Element] to stdout, or the error message.
 
-> main = getContents >>= parseTest (parseAsm <* eof)
+> main = getContents >>= parseTest parseAsm
