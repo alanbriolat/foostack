@@ -9,12 +9,15 @@
 
 > import FooStack.Asm
 
+
+BASIC TOKEN PARSERS
+===================
+
 We need a couple of useful things from Parsec's generic token parser.
 
 > emptyLexer = Token.makeTokenParser Language.emptyDef
 > decimal = Token.decimal emptyLexer
 > hexadecimal = Token.hexadecimal emptyLexer
-
 
 We're going to deal with whitespace a lot, and our definition varies a bit from
 Parsec's.  Newlines are used to separate statements, so our definition of
@@ -35,7 +38,8 @@ We're also going to be handling things case-insensitively a lot.
 
 Annoyingly, Parsec's "integer" parser is a "lexeme" and will gobble up our
 newlines.  This means we basically have to reconstruct it ourselves.  Most of
-what is here is inspired by the implementation of Parsec's "integer".
+what is here is inspired by the implementation of Parsec's "integer".  For now
+let's only worry about decimal and hexidecimal integers.
 
 > integer :: Parser Integer
 > integer =   do f <- sign
@@ -49,12 +53,19 @@ what is here is inspired by the implementation of Parsec's "integer".
 >     number =   (char '0' >> hexadecimal)
 >            <|> decimal
 
-Basic identifier parsing: alphanumeric plus underscore, but not starting with a
-number.  Identifiers must be at least 2 characters long, to make them
-completely unambiguous compared to register references.
+Registers must be a valid register letter.  They are stored in the assembly AST
+as a lowercase character, but usage in the source should be case-insensitive.
+
+> register :: Parser Register
+> register = toLower <$> oneOf (registers ++ uppercase registers)
+
+Basic identifier parsing: alphanumeric plus underscore, and must start with a
+letter.  Identifiers must be at least 2 characters long, to make them
+completely unambiguous compared to register references.  (This is a source
+readability convenience, not necessary for the parser.)
 
 > identifier :: Parser String
-> identifier =   do first <- (letter <|> char '_')
+> identifier =   do first <- letter
 >                   rest <- (many1 $ alphaNum <|> char '_')
 >                   return (first:rest)
 >            <?> "identifier"
@@ -66,12 +77,6 @@ an instruction.
 > instruction :: Parser String
 > instruction = identifier <?> "instruction"
 
-The identifier parser is also sufficient for label names.  Labels are signified
-by a separating colon before the code they refer to.
-
-> label :: Parser String
-> label = identifier <* (spaces >> char ':' >> spaces) <?> "label"
-
 We can also re-used the identifier parser for assembler directives.  Like with
 instructions, whether or not it is valid can be handled by the directive
 parser.
@@ -79,11 +84,24 @@ parser.
 > directive :: Parser String
 > directive = char '.' >> identifier <?> "directive"
 
-Registers must be a valid register letter.  They are stored in the assembly AST
-as a lowercase character, but usage in the source should be case-insensitive.
+A target is a named code location.  It consists of the target name followed by
+a colon.  A target can either be a symbol (global name) or a label (local name).
+Symbols should be globally unique, whereas labels should be unique between
+symbols.  Labels are signified by a leading underscore.
 
-> register :: Parser Register
-> register = toLower <$> oneOf (registers ++ uppercase registers)
+The identifier parser can be reused for both symbols and labels.
+
+> symbol :: Parser String
+> symbol = identifier <?> "symbol"
+
+> label :: Parser String
+> label = char '_' >> identifier <?> "label"
+
+> target :: Parser Element
+> target =   do e <- (Label <$> label) <|> (Symbol <$> symbol)
+>               spaces >> char ':' >> spaces
+>               return e
+>        <?> "target"
 
 Comments are line comments, and start with a semicolon.  They can contain
 anything, and end at the newline.
@@ -99,20 +117,41 @@ whitespace on the next line will also be consumed.
 > lineending :: Parser ()
 > lineending = spaces >> ((linecomment >> return ()) <|> (newline >> return ())) >> spaces
 
-Let's work from the top down.  Firstly we need a single type to represent all
-available code elements - there are more than just instructions!
 
-> data Element = Op Op
+THE ABSTRACT SYNTAX TREE
+========================
+
+Because we're going to resolve a lot of stuff in the post-parsing step, we need
+a well-annotated AST.  Luckly Parsec makes this easy with the SourcePos data
+that's available.
+
+> type AST = [ASTNode]
+> type ASTNode = (SourcePos, Element)
+
+There are several different possible source elements.
+
+> data Element = Instruction Op
+>              | Directive Directive
+>              | Symbol String
+>              | SymbolRef String
 >              | Label String
 >              | LabelRef String
->              | UnknownDirective String
 >              deriving (Show)
+
+We don't want to clutter the code with annotation boilerplate everywhere, so
+let's define a helper that annotates the result of a parser with the token's
+start position.
+
+> ann :: Parser a -> Parser (SourcePos, a)
+> ann parser = do pos <- getPosition
+>                 token <- parser
+>                 return (pos, token)
 
 At the top level, we are parsing on a line-by-line basis.  Each line must
 therefore have at least one newline character between it and the next line.
 Using "spaces" consumes end-of-line whitespace.
 
-> parseAsm :: Parser [Element]
+> parseAsm :: Parser AST
 > parseAsm = concat <$> parseLine `sepEndBy` lineending <* eof
 
 Each line consists of either a lone assembler directive, or a label,
@@ -120,59 +159,62 @@ instruction, or both.  This gives us the flexibility of multiple labels for the
 same location, e.g. a subroutine that starts with a loop.  It also allows
 special things like ".align 8".
 
-> parseLine :: Parser [Element]
+> parseLine :: Parser AST
 > parseLine =   parseDirective
->           <|> concat <$> sequence [ option [] (try parseLabel)
+>           <|> concat <$> sequence [ option [] (try parseTarget)
 >                                   , option [] (try parseInstruction)
 >                                   ]
 
 Here's a really basic directive element parser.  It should be fleshed out to
-handle useful directives, such as ".align".
+handle useful directives.
 
-> parseDirective :: Parser [Element]
-> parseDirective = (:[]) <$> UnknownDirective <$> directive
+> data Directive = UnknownDirective String
+>                deriving (Show)
 
-A label is just an identifier that ends with a colon.
+> parseDirective :: Parser AST
+> parseDirective = (:[]) <$> ann ((Directive . UnknownDirective) <$> directive)
 
-> parseLabel :: Parser [Element]
-> parseLabel = (:[]) <$> Label <$> label
+As described above, a target is an identifier that ends with a colon.
+
+> parseTarget :: Parser AST
+> parseTarget = (:[]) <$> ann target
 
 An instruction is an identifier followed by some instruction-specific handling.
 We make the instruction uppercase so we can treat it case-insensitively.
 
-> parseInstruction :: Parser [Element]
-> parseInstruction = uppercase <$> instruction >>= parseOp
+> parseInstruction :: Parser AST
+> parseInstruction = ann (uppercase <$> instruction) >>= parseOp
 
 Each valid instruction can be parsed differently, but generally speaking they
 will make use of more generic operand parsing.
 
-> parseOp :: String -> Parser [Element]
-> parseOp "SET"  = parseOperands2 SET
-> parseOp "ADD"  = parseOperands2 ADD
-> parseOp "SUB"  = parseOperands2 SUB
-> parseOp "MUL"  = parseOperands2 MUL
-> parseOp "SHL"  = parseOperands2 SHL
-> parseOp "SHR"  = parseOperands2 SHR
-> parseOp "AND"  = parseOperands2 AND
-> parseOp "BOR"  = parseOperands2 BOR
-> parseOp "XOR"  = parseOperands2 XOR
-> parseOp "DATA" = spaces1 >> (:[]) <$> parseData
-> parseOp "LOAD" = parseOperandAndData $ EXT . LOAD
-> parseOp "PUSH" = parseOperands1 $ EXT . PUSH
-> parseOp "POP"  = parseOperands1 $ EXT . POP
-> parseOp "PEEK" = parseOperands1 $ EXT . PEEK
-> parseOp _      = fail "unknown instruction"
+> parseOp :: (SourcePos, String) -> Parser AST
+> parseOp (pos, "SET" ) = parseOperands2 pos SET
+> parseOp (pos, "ADD" ) = parseOperands2 pos ADD
+> parseOp (pos, "SUB" ) = parseOperands2 pos SUB
+> parseOp (pos, "MUL" ) = parseOperands2 pos MUL
+> parseOp (pos, "SHL" ) = parseOperands2 pos SHL
+> parseOp (pos, "SHR" ) = parseOperands2 pos SHR
+> parseOp (pos, "AND" ) = parseOperands2 pos AND
+> parseOp (pos, "BOR" ) = parseOperands2 pos BOR
+> parseOp (pos, "XOR" ) = parseOperands2 pos XOR
+> parseOp (pos, "DATA") = spaces1 >> (:[]) <$> parseData
+> parseOp (pos, "LOAD") = parseOperandAndData $ EXT . LOAD
+> parseOp (pos, "PUSH") = parseOperands1 $ EXT . PUSH
+> parseOp (pos, "POP" ) = parseOperands1 $ EXT . POP
+> parseOp (pos, "PEEK") = parseOperands1 $ EXT . PEEK
+> parseOp _             = fail "unknown instruction"
 
 All of the basic instructions have a LHS operand and RHS operand.  This wraps
 up this pattern as a reusable parser.  Operands are separated by a comma, and
 at least one space must separate the first operand from the instruction.
 
-> parseOperands2 :: (Operand -> Operand -> Op) -> Parser [Element]
-> parseOperands2 op = do spaces1
->                        a <- parseOperandLHS
->                        spaces >> char ',' >> spaces
->                        b <- parseOperandRHS
->                        return [Op $ op a b]
+> parseOperands2 :: SourcePos -> (Operand -> Operand -> Op) -> Parser AST
+> parseOperands2 pos op = do spaces1
+>                            a <- parseOperandLHS
+>                            spaces >> char ',' >> spaces
+>                            b <- parseOperandRHS
+>                            return [(pos, Instruction $ op a b)]
 
 Extended instruction often have a LHS operand and a full-word data operand.
 This data operand will actually create an extra "DATA" instruction, but it is
@@ -183,12 +225,12 @@ much nicer to be able to write it inline in the assembly language.
 >                             a <- parseOperandLHS
 >                             spaces >> char ',' >> spaces
 >                             d <- parseData
->                             return [Op $ op a, d]
+>                             return [Instruction $ op a, d]
 
 Some other extended instructions just have a LHS.
 
 > parseOperands1 :: (Operand -> Op) -> Parser [Element]
-> parseOperands1 op = spaces1 >> (:[]) <$> (Op . op) <$> parseOperandLHS
+> parseOperands1 op = spaces1 >> (:[]) <$> (Instruction . op) <$> parseOperandLHS
 
 There are two kinds of operands: LHS and RHS.  LHS operands must refer to a
 location - a register, frame offset or address.
@@ -219,7 +261,7 @@ when it knows where the labels are.
 TODO: range check literals -2^31 to 2^31-1.
 
 > parseData :: Parser Element
-> parseData =   Op . DATA <$> fromIntegral <$> integer
+> parseData =   Instruction . DATA <$> fromIntegral <$> integer
 >           <|> LabelRef <$> identifier
 
 
