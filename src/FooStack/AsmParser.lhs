@@ -79,7 +79,7 @@ an instruction.
 
 We can also re-used the identifier parser for assembler directives.  Like with
 instructions, whether or not it is valid can be handled by the directive
-parser.
+parser.  Directives start with a period.
 
 > directive :: Parser String
 > directive = char '.' >> identifier <?> "directive"
@@ -147,17 +147,20 @@ start position.
 >                 token <- parser
 >                 return (pos, token)
 
-At the top level, we are parsing on a line-by-line basis.  Each line must
-therefore have at least one newline character between it and the next line.
-Using "spaces" consumes end-of-line whitespace.
+
+THE ASSEMBLY PARSER
+===================
+
+At the top level, we are parsing on a line-by-line basis.  Input lines are
+therefore separated by one or more line endings, and as defined above line
+endings include line comments.
 
 > parseAsm :: Parser AST
 > parseAsm = concat <$> parseLine `sepEndBy` lineending <* eof
 
-Each line consists of either a lone assembler directive, or a label,
-instruction, or both.  This gives us the flexibility of multiple labels for the
-same location, e.g. a subroutine that starts with a loop.  It also allows
-special things like ".align 8".
+Each line consists of either a lone assembler directive, or a target,
+instruction, or both.  This gives us the flexibility of multiple targets for
+the same location, e.g. a subroutine that starts with a loop.
 
 > parseLine :: Parser AST
 > parseLine =   parseDirective
@@ -174,7 +177,8 @@ handle useful directives.
 > parseDirective :: Parser AST
 > parseDirective = (:[]) <$> ann ((Directive . UnknownDirective) <$> directive)
 
-As described above, a target is an identifier that ends with a colon.
+As described above, a target is either a symbol or a label that gives a name
+to a code location.
 
 > parseTarget :: Parser AST
 > parseTarget = (:[]) <$> ann target
@@ -199,10 +203,10 @@ will make use of more generic operand parsing.
 > parseOp (pos, "BOR" ) = parseOperands2 pos BOR
 > parseOp (pos, "XOR" ) = parseOperands2 pos XOR
 > parseOp (pos, "DATA") = spaces1 >> (:[]) <$> parseData
-> parseOp (pos, "LOAD") = parseOperandAndData $ EXT . LOAD
-> parseOp (pos, "PUSH") = parseOperands1 $ EXT . PUSH
-> parseOp (pos, "POP" ) = parseOperands1 $ EXT . POP
-> parseOp (pos, "PEEK") = parseOperands1 $ EXT . PEEK
+> parseOp (pos, "LOAD") = parseOperandAndData pos (EXT . LOAD)
+> parseOp (pos, "PUSH") = parseOperands1 pos (EXT . PUSH)
+> parseOp (pos, "POP" ) = parseOperands1 pos (EXT . POP)
+> parseOp (pos, "PEEK") = parseOperands1 pos (EXT . PEEK)
 > parseOp _             = fail "unknown instruction"
 
 All of the basic instructions have a LHS operand and RHS operand.  This wraps
@@ -217,25 +221,25 @@ at least one space must separate the first operand from the instruction.
 >                            return [(pos, Instruction $ op a b)]
 
 Extended instruction often have a LHS operand and a full-word data operand.
-This data operand will actually create an extra "DATA" instruction, but it is
-much nicer to be able to write it inline in the assembly language.
+This data operand will actually create an extra instruction, but it is much
+nicer to be able to write it inline in the assembly language.
 
-> parseOperandAndData :: (Operand -> Op) -> Parser [Element]
-> parseOperandAndData op = do spaces1
->                             a <- parseOperandLHS
->                             spaces >> char ',' >> spaces
->                             d <- parseData
->                             return [Instruction $ op a, d]
+> parseOperandAndData :: SourcePos -> (Operand -> Op) -> Parser AST
+> parseOperandAndData pos op = do spaces1
+>                                 a <- parseOperandLHS
+>                                 spaces >> char ',' >> spaces
+>                                 d <- parseData
+>                                 return [(pos, Instruction $ op a), d]
 
 Some other extended instructions just have a LHS.
 
-> parseOperands1 :: (Operand -> Op) -> Parser [Element]
-> parseOperands1 op = spaces1 >> (:[]) <$> (Instruction . op) <$> parseOperandLHS
+> parseOperands1 :: SourcePos -> (Operand -> Op) -> Parser AST
+> parseOperands1 pos op = do spaces1
+>                            a <- parseOperandLHS
+>                            return [(pos, Instruction $ op a)]
 
 There are two kinds of operands: LHS and RHS.  LHS operands must refer to a
 location - a register, frame offset or address.
-
-TODO: make registers also case-insensitive.
 
 > parseOperandLHS :: Parser Operand
 > parseOperandLHS =   (char '@' >> Addr <$> register)
@@ -251,21 +255,25 @@ TODO: range check literals -8 to 7.
 > parseOperandRHS =   parseOperandLHS
 >                 <|> Lit <$> fromIntegral <$> integer
 
-"Data" elements are things that are going to take up a whole word on their own.
-For example, the "LOAD a, 0xBEEF" instruction would be an (Op (LOAD (Reg 'a')))
-followed by (Op (DATA 0xBEEF)).  For things like absolute jump instructions,
-the value might be a label reference.  This parser allows for that, returning
-a LabelRef element.  The assembler should replace these with DATA instructions
-when it knows where the labels are.
+Data elements are things that are going to take up a whole word on their own.
+They can either be a literal 16-bit word or a target; in the case of a target
+they will eventually take a value related to the address of the target.
 
 TODO: range check literals -2^31 to 2^31-1.
 
-> parseData :: Parser Element
-> parseData =   Instruction . DATA <$> fromIntegral <$> integer
->           <|> LabelRef <$> identifier
+> parseData :: Parser ASTNode
+> parseData = ann (   LabelRef <$> label
+>                 <|> SymbolRef <$> symbol
+>                 <|> Instruction . DATA <$> fromIntegral <$> integer
+>                 )
 
 
 If we run this module as a program, it will attempt to parse stdin and write
-the resulting [Element] to stdout, or the error message.
+the resulting AST to stdout, or the error message.
 
-> main = getContents >>= parseTest parseAsm
+> main = do c <- getContents
+>           case parse parseAsm "" c of
+>             Left err  -> do putStr "parse error at "
+>                             print err
+>             Right x   -> mapM_ print x
+>

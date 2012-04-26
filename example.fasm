@@ -4,10 +4,10 @@ main:   load    a, 0x000F       ; example line comment
         set     b, a
         shl     b, 4
 
-multiple:
-labels: 
+_multiple:
+_labels:
         bor     a, b            ; a should now be 0x00FF
-        load    c, multiple
+        load    c, _multiple
         load    d, labels       ; c == d
 
 ; Traverse the below data segment, loading it into w, x, y, z
@@ -20,6 +20,7 @@ labels:
         add     a, 1
         set     z, @a
 
+.example_directive
 ; An example chunk of data
 some_data:
         data    0x000F
