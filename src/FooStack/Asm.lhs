@@ -26,6 +26,7 @@ A register identifier is an integer from 0 to 15.
 
 > type Register = Char
 
+> type Word = Word16
 Registers should be referred to in code by a single-letter alias.  The final 4
 should be used as "argument registers", hence the separate naming.
 
@@ -45,7 +46,7 @@ opcode and two 6-bit operands.
 >         | AND Operand Operand     -- 0x7, set a = a & b
 >         | BOR Operand Operand     -- 0x8, set a = a | b
 >         | XOR Operand Operand     -- 0x9, set a = a ^ b
->         | DATA Word16             -- a raw 16-bit integer
+>         | DATA Word               -- a raw 16-bit integer
 >         deriving (Show)
 
 To achieve a larger range of available opcodes, the "extended" opcodes are
@@ -64,7 +65,7 @@ Operands need to provide several different methods for playing with data.  We
 have 6 bits to play with.  If we want a reasonable number of registers (16),
 that leaves us 2 bits for addressing mode.
 
-> data Operand = Lit Word16         -- 00xxxx: short literals (-8 to +7)
+> data Operand = Lit Word           -- 00xxxx: short literals (-8 to +7)
 >              | Reg Register       -- 01xxxx: r = register r
 >              | Frame Register     -- 10xxxx: $r = memory location [FP + r]
 >              | Addr Register      -- 11xxxx: @r = memory location [r]
@@ -72,12 +73,12 @@ that leaves us 2 bits for addressing mode.
 
 Define the binary representations of operands:
 
-> encodeOperand :: Operand -> Word16
+> encodeOperand :: Operand -> Word
 > encodeOperand = encode
 >     where
->     combine :: Word16 -> Word16 -> Word16
+>     combine :: Word -> Word -> Word
 >     combine mode a = ((mode .&. 0x3) `shiftL` 4) .|. (a .&. 0xF)
->     encode :: Operand -> Word16
+>     encode :: Operand -> Word
 >     encode (Lit a)   = combine 0x0 a
 >     encode (Reg r)   = combine 0x1 $ fromIntegral $ fromJust $ r `elemIndex` registers
 >     encode (Frame r) = combine 0x2 $ fromIntegral $ fromJust $ r `elemIndex` registers
@@ -88,12 +89,12 @@ instruction format is bbbbbbaaaaaaoooo.  Extended instructions are
 aaaaaaoooooo0000.  The special case of a "data" operation is just a 16-bit
 literal.
 
-> encodeOp :: Op -> Word16
+> encodeOp :: Op -> Word
 > encodeOp = encode
 >     where
->     combine :: Word16 -> Word16 -> Word16 -> Word16
+>     combine :: Word -> Word -> Word -> Word
 >     combine o a b = (o .&. 0xF) .|. ((a .&. 0x3F) `shiftL` 4) .|. ((b .&. 0x3F) `shiftL` 10)
->     encode :: Op -> Word16
+>     encode :: Op -> Word
 >     encode (SET a b) = combine 0x1 (encodeOperand a) (encodeOperand b)
 >     encode (ADD a b) = combine 0x2 (encodeOperand a) (encodeOperand b)
 >     encode (SUB a b) = combine 0x3 (encodeOperand a) (encodeOperand b)
@@ -111,12 +112,12 @@ literal.
 
 Decode an operand:
 
-> decodeOperand :: Word16 -> Operand
+> decodeOperand :: Word -> Operand
 > decodeOperand = decode . split
 >     where
->     split :: Word16 -> (Word16, Word16)
+>     split :: Word -> (Word, Word)
 >     split a = ((a .&. 0x30) `shiftR` 4, a .&. 0xF)
->     decode :: (Word16, Word16) -> Operand
+>     decode :: (Word, Word) -> Operand
 >     decode (0x0, a) = Lit a
 >     decode (0x1, r) = Reg $ registers !! fromIntegral r
 >     decode (0x2, r) = Frame $ registers !! fromIntegral r
@@ -126,12 +127,12 @@ Decode an instruction.  Note that we can't decode data instructions because
 there is nothing to mark them as such.  When reading a binary, we need to make
 sure we handle instructions that are followed by data and read the data in.
 
-> decodeOp :: Word16 -> Op
+> decodeOp :: Word -> Op
 > decodeOp = decode . split
 >     where
->     split :: Word16 -> (Word16, Word16, Word16)
+>     split :: Word -> (Word, Word, Word)
 >     split inst = (inst .&. 0xF, (inst `shiftR` 4) .&. 0x3F, (inst `shiftR` 10) .&. 0x3F)
->     decode :: (Word16, Word16, Word16) -> Op
+>     decode :: (Word, Word, Word) -> Op
 >     decode (0x1, a, b) = SET (decodeOperand a) (decodeOperand b)
 >     decode (0x2, a, b) = ADD (decodeOperand a) (decodeOperand b)
 >     decode (0x3, a, b) = SUB (decodeOperand a) (decodeOperand b)
