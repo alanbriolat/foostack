@@ -14,7 +14,16 @@ Some things these requirments might suggest:
 - Stack pointer and frame pointer.
 - Argument registers to form part of the calling convention for the first n arguments.
 
-> module FooStack.Asm where
+> module FooStack.Asm (
+>     Word,
+>     Register,
+>     registers,
+>     Op(..),
+>     ExtOp(..),
+>     Operand(..),
+>     encodeOp, decodeOp,
+>     ) where
+
 > import Data.Word (Word16)
 > import Data.Binary.Put (putWord16be, Put, runPut)
 > import Data.ByteString.Lazy (ByteString)
@@ -22,16 +31,48 @@ Some things these requirments might suggest:
 > import Data.List (elemIndex)
 > import Data.Maybe (fromJust)
 
-A register identifier is an integer from 0 to 15.
 
-> type Register = Char
+THE BASICS
+==========
+
+This is a 16-bit machine.  Let's export Word as being Word16.
 
 > type Word = Word16
-Registers should be referred to in code by a single-letter alias.  The final 4
-should be used as "argument registers", hence the separate naming.
 
+There are 16 registers, each with it's own identifier.  The register naming
+is inspired by the intended usage in complex code; r is the return register,
+x, y and z are argument registers, and a-l are general-purpose registers.
+
+> type Register = Char
 > registers :: [Register]
-> registers = "abcdefghijklwxyz"
+> registers = "abcdefghijklrxyz"
+
+
+INSTRUCTION ENCODING INTRODUCTION
+=================================
+
+A bit of a chicken-and-egg problem: "which came first, the instructions or the
+instruction encoding?"  The encoding needs to represent the operations, but it
+also constrains the kinds of operations we can have.  To kick things off, I've
+borrowed the general concept of instruction encoding from Notch's DCPU-16: a
+4-bit opcode and two 6-bit operands.  Since this would only give us 16 possible
+instructions, there are also "extended instructions" where the "basic" opcode
+is 0 and the extended opcode occupies the first operand slot, allowing a single
+6-bit operand.  This gives us a total of 79 instructions: 15 2-operand and
+64 1-operand.  Aiming at a RISC architecture, this should be enough, but just
+to leave some wiggle room the extended opcode 0 is reserved for further
+extension into instructions with no operands, giving us a total of 142 possible
+instructions.  To make sure nothing is wasted, instructions should be encoded
+using the instruction class that matches the number of operands required.
+
+So now to deal with operands.  A 6-bit operand doesn't give us a huge amount of
+scope for how to treat the values.  We need to consider the common use cases of
+any higher-level language that is going to compile down to this instruction set
+and decide what facilities we should provide.
+
+Now that the low-level considerations are out of the way and we know what we
+have to play with,
+
 
 Borrowing DCPU-16's instruction format, bbbbbbaaaaaaoooo.  That is, a 4-bit
 opcode and two 6-bit operands.
