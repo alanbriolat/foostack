@@ -15,16 +15,16 @@ Some things these requirments might suggest:
 - Argument registers to form part of the calling convention for the first n arguments.
 
 > module FooStack.Asm (
+>     Byte,
 >     Word,
->     Register,
->     registers,
->     Op(..),
->     ExtOp(..),
->     Operand(..),
+>     Address,
+>     Register(..),
+>     byteRegisters,
+>     Instruction(..),
 >     encodeOp, decodeOp,
 >     ) where
 
-> import Data.Word (Word16)
+> import Data.Word (Word8, Word16)
 > import Data.Binary.Put (putWord16be, Put, runPut)
 > import Data.ByteString.Lazy (ByteString)
 > import Data.Bits ((.|.), (.&.), shiftL, shiftR)
@@ -35,17 +35,21 @@ Some things these requirments might suggest:
 THE BASICS
 ==========
 
-This is a 16-bit machine.  Let's export Word as being Word16.
+I'll often be talking about Bytes and Words.  Bytes are always 8 bits - what
+else would they be?
+
+> type Byte = Word8
+
+The machine is 16-bit at heart, so Word means Word16.
 
 > type Word = Word16
 
-There are 16 registers, each with it's own identifier.  The register naming
-is inspired by the intended usage in complex code; r is the return register,
-x, y and z are argument registers, and a-l are general-purpose registers.
+Memory is a 16-bit address space, with byte addressing like most architectures.
+I've decided on little endian byte order when representing words as bytes, by
+the hugely scientific process of reading the wiki page and picking whichever
+seemed cleverer.
 
-> type Register = Char
-> registers :: [Register]
-> registers = "abcdefghijklrxyz"
+> type Address = Word
 
 
 INSTRUCTION ENCODING INTRODUCTION
@@ -53,26 +57,106 @@ INSTRUCTION ENCODING INTRODUCTION
 
 A bit of a chicken-and-egg problem: "which came first, the instructions or the
 instruction encoding?"  The encoding needs to represent the operations, but it
-also constrains the kinds of operations we can have.  To kick things off, I've
-borrowed the general concept of instruction encoding from Notch's DCPU-16: a
-4-bit opcode and two 6-bit operands.  Since this would only give us 16 possible
-instructions, there are also "extended instructions" where the "basic" opcode
-is 0 and the extended opcode occupies the first operand slot, allowing a single
-6-bit operand.  This gives us a total of 79 instructions: 15 2-operand and
-64 1-operand.  Aiming at a RISC architecture, this should be enough, but just
-to leave some wiggle room the extended opcode 0 is reserved for further
-extension into instructions with no operands, giving us a total of 142 possible
-instructions.  To make sure nothing is wasted, instructions should be encoded
-using the instruction class that matches the number of operands required.
+also constrains the kinds of operations we can have.  To kick things off, I
+like the idea of constant-width instructions, so I'm going to stick with that.
+I've borrowed the general concept of opcode encoding from what I saw in Notch's
+DCPU-16: a 4-bit "basic" opcode with 12 bits of operand, with an opcode of 0
+denoting an "extended" opcode which takes the next 6 bits and has 6 bits of
+operand.  In fact I've decided to take it even further, so an extended opcode
+of 0 signifies an opcode in the last 6 bits, with no operand.  This gives us a
+total opcode space of 142: 15 with 12-bit operands, 63 with 6-bit operands and
+64 with no operand.  I'm aiming for a RISC-style architecture, so this should
+be plenty.
 
-So now to deal with operands.  A 6-bit operand doesn't give us a huge amount of
-scope for how to treat the values.  We need to consider the common use cases of
-any higher-level language that is going to compile down to this instruction set
-and decide what facilities we should provide.
+Originally I was tempted to go with a DCPU-16-style operand format, using the
+same generic 6-bit operand format everywhere.  Unfortunately, this really
+limits us when it comes to immediate values and available registers.  Instead
+I've decided to take the approach where the operand format is dependent on the
+instruction.  This gives a much more flexible environment for designing
+instructions.
 
-Now that the low-level considerations are out of the way and we know what we
-have to play with,
 
+REGISTERS
+=========
+
+Registers are the staple diet of code, and they need to be well thought out.
+We need to consider the kinds of things people will want to do with them, and
+maybe even establish some recommended conventions for using them, as
+architectures often have done.  We also need to keep in mind that we want
+plenty of registers, but we need to be able to address them all.  We are
+limited to 64 register names if we want to be able to use any pair in
+two-register instructions.
+
+I'm going to make the decision now that all registers are accessible, none
+hidden.  This means it's possible to jump in a unreturnable way by setting the
+program counter, as an example.  We're definitely going to want a stack pointer
+and a program counter, so let's create those.
+
+> data Register = SP
+>               | PC
+
+We'll want some general-purpose registers too.  I'm going to borrow from x86
+here and let general purpose registers be accessible as 16-bit values, or as
+two 8-bit values - high byte and low byte.  For register A these would be AX,
+AH and AL.  To digress into instruction set concerns, it is worth noting that
+we could create a "load byte" instruction with an 8-bit immediate value and 4
+bits of operand remaining, which can then identify the 8-bit register target.
+This limits us to 16 8-bit registers, i.e. 8 full registers that can have their
+bytes addressed individually.  For now let's create 4 general-purpose registers
+from A to D.
+
+>               | AX | AH | AL
+>               | BX | BH | BL
+>               | CX | CH | CL
+>               | DX | DH | DL
+
+Relative indexing is a really common thing to want to do, so let's provide some
+base address registers.  We'll want at least 2, to account for "global" and
+"frame" pointers, because these are such common uses.  Let's have 3 so we still
+have one to play with.
+
+>               | IX | IY | IZ
+
+I'm sure there will be more to follow as I think things up, or as I try and use
+the CPU for something.
+
+For the benefit of the assembler, these are the valid byte registers.
+
+> byteRegisters :: [Register]
+> byteRegisters = [AH, AL, BH, BL, CH, CL, DH, DL]
+
+
+THE INSTRUCTION SET
+===================
+
+Now that the really low level considerations are out of the way, we can start
+thinking about the operations that need to be provided.
+
+Mostly I'm going to make these mnemonics up on the spot, hopefully following
+some kind of intelligible convention.  I'm also going to try not to reference
+the encoding too much in this section, since that should mostly be a separate
+concern.
+
+To start with, let's have the HALT instruction.  It sits there and does nothing
+whatsoever, not even incrementing the program counter.
+
+> data Instruction = HALT
+
+Obviously we need to be able to get values into registers.  Using the idea
+discussed earlier we can load individual bytes into byte registers.  It's the
+job of the assembler to make sure the specified register is actually allowed
+for this usage, since only a subset of registers are actually valid.
+
+TODO: Restrict this in a better way.
+
+>                  | LDBI Register Byte
+
+Next, let's tackle copying values between registers.  We can copy values
+between any two registers.  If a word register is copied to a byte register,
+the top byte is dropped.  If a byte register is copied to a word register, the
+top byte is set to 0.
+
+>                  | LD Register Register
 
 Borrowing DCPU-16's instruction format, bbbbbbaaaaaaoooo.  That is, a 4-bit
 opcode and two 6-bit operands.
