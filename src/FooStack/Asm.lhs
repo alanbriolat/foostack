@@ -19,9 +19,8 @@ Some things these requirments might suggest:
 >     Word,
 >     Address,
 >     Register(..),
->     byteRegisters,
+>     HalfRegister(..),
 >     Instruction(..),
->     encodeOp, decodeOp,
 >     ) where
 
 > import Data.Word (Word8, Word16)
@@ -59,21 +58,22 @@ A bit of a chicken-and-egg problem: "which came first, the instructions or the
 instruction encoding?"  The encoding needs to represent the operations, but it
 also constrains the kinds of operations we can have.  To kick things off, I
 like the idea of constant-width instructions, so I'm going to stick with that.
-I've borrowed the general concept of opcode encoding from what I saw in Notch's
-DCPU-16: a 4-bit "basic" opcode with 12 bits of operand, with an opcode of 0
-denoting an "extended" opcode which takes the next 6 bits and has 6 bits of
-operand.  In fact I've decided to take it even further, so an extended opcode
-of 0 signifies an opcode in the last 6 bits, with no operand.  This gives us a
-total opcode space of 142: 15 with 12-bit operands, 63 with 6-bit operands and
-64 with no operand.  I'm aiming for a RISC-style architecture, so this should
-be plenty.
+This doesn't seem to be the normal approach, but oh well - I feel it will be
+easier to keep track of.
+
+To make this work, I need a consistent, easy-to-decode scheme to pack opcodes
+and operands into the 16-bit instruction word.  I'm going to borrow a concept
+that Notch's DCPU-16 brought to my attention: splitting opcodes into nested
+classes, where an opcode of 0 in the outer class signifies that an inner opcode
+is present.  This lets us have a few instructions with lots of operand bits,
+and lots of instructions with few operand bits, hopefully balancing the needs
+for powerful and numerous instructions.
 
 Originally I was tempted to go with a DCPU-16-style operand format, using the
 same generic 6-bit operand format everywhere.  Unfortunately, this really
-limits us when it comes to immediate values and available registers.  Instead
-I've decided to take the approach where the operand format is dependent on the
-instruction.  This gives a much more flexible environment for designing
-instructions.
+limits us when it comes to possible operand values, so instead the operand bits
+are given meaning by the instruction they're used in.  This is a much more
+flexible environment for designing instructions.
 
 
 REGISTERS
@@ -83,47 +83,59 @@ Registers are the staple diet of code, and they need to be well thought out.
 We need to consider the kinds of things people will want to do with them, and
 maybe even establish some recommended conventions for using them, as
 architectures often have done.  We also need to keep in mind that we want
-plenty of registers, but we need to be able to address them all.  We are
-limited to 64 register names if we want to be able to use any pair in
-two-register instructions.
+plenty of registers, but we need to be able to address them all.  We also don't
+want too many registers; we don't gain much speed if we replace memory accesses
+for variables with memory accesses for preserving lots of registers!
 
-I'm going to make the decision now that all registers are accessible, none
-hidden.  This means it's possible to jump in a unreturnable way by setting the
-program counter, as an example.  We're definitely going to want a stack pointer
-and a program counter, so let's create those.
+To make the decision for the sake of making it, I'm going to have a uniform set
+of 16 16-bit registers.  These will include general purpose registers and
+specific purpose registers, e.g. the program counter and stack pointer.  This
+gives maximum flexibility for ways that code can affect its operation.  16-bit
+registers can be addressed with a 4-bit identifier under this scheme, which
+gives a lot of scope for 2- and possibly even 3-operand instructions.
 
-> data Register = SP
->               | PC
+As already mentioned, we need a program counter and a stack pointer no matter
+what.
 
-We'll want some general-purpose registers too.  I'm going to borrow from x86
-here and let general purpose registers be accessible as 16-bit values, or as
-two 8-bit values - high byte and low byte.  For register A these would be AX,
-AH and AL.  To digress into instruction set concerns, it is worth noting that
-we could create a "load byte" instruction with an 8-bit immediate value and 4
-bits of operand remaining, which can then identify the 8-bit register target.
-This limits us to 16 8-bit registers, i.e. 8 full registers that can have their
-bytes addressed individually.  For now let's create 4 general-purpose registers
-from A to D.
+> data Register = PC
+>               | SP
 
->               | AX | AH | AL
->               | BX | BH | BL
->               | CX | CH | CL
->               | DX | DH | DL
+We also need some general-purpose registers.  The naming is reminiscent of 8086
+general-purpose registers because they're actually going to work somewhat like
+those (see below).
 
-Relative indexing is a really common thing to want to do, so let's provide some
-base address registers.  We'll want at least 2, to account for "global" and
-"frame" pointers, because these are such common uses.  Let's have 3 so we still
-have one to play with.
+>               | AX
+>               | BX
+>               | CX
+>               | DX
 
->               | IX | IY | IZ
+We're also going to want to be able to do "indirect offset" addressing of some
+kind because it's so useful in higher-level languages (arrays, stack frames,
+etc.), so let's provide enough base address registers to be able to do this
+with reasonable scope for a good usage convention.  The naming is inspired by
+having used the Z80/Z180.
 
-I'm sure there will be more to follow as I think things up, or as I try and use
-the CPU for something.
+>               | IX
+>               | IY
+>               | IZ
 
-For the benefit of the assembler, these are the valid byte registers.
+TODO: There should probably be more registers, I'm sure I'll probably come up
+with some at a later date.
 
-> byteRegisters :: [Register]
-> byteRegisters = [AH, AL, BH, BL, CH, CL, DH, DL]
+>               deriving (Eq, Show, Read)
+
+I mentioned that the general-purpose registers were somewhat like those in the
+8086.  What I meant is that I think the ability to work with individual bytes is
+pretty useful, so e.g. for AX there is a corresponding AH and AL for the high
+and low bytes respectively.  If we allow 4-bit byte register identifiers, then
+as many as half of our word registers can be used as pairs of byte registers.
+
+> data HalfRegister = AH | AL
+>                   | BH | BL
+>                   | CH | CL
+>                   | DH | DL
+>                   deriving (Eq, Show, Read)
+
 
 
 THE INSTRUCTION SET
@@ -135,139 +147,72 @@ thinking about the operations that need to be provided.
 Mostly I'm going to make these mnemonics up on the spot, hopefully following
 some kind of intelligible convention.  I'm also going to try not to reference
 the encoding too much in this section, since that should mostly be a separate
-concern.
+concern.  The main concern is that the instruction set should fit within the
+encoding.
 
 To start with, let's have the HALT instruction.  It sits there and does nothing
 whatsoever, not even incrementing the program counter.
 
 > data Instruction = HALT
 
-Obviously we need to be able to get values into registers.  Using the idea
-discussed earlier we can load individual bytes into byte registers.  It's the
-job of the assembler to make sure the specified register is actually allowed
-for this usage, since only a subset of registers are actually valid.
+Obviously we need to be able to directly load values into registers, otherwise
+we couldn't have any kind of literal value in our code!  With a 16-bit fixed
+width instruction format and a 16-bit register width, we have an obvious
+problem: we can't load 16-bit values.  Not to worry though, we can easily load
+bytes and still have room to spare to specify where to.  Since our general-
+purpose registers have byte access, we can just load the low byte and the high
+byte.  LDBI sets the value of the specified byte register, having no effect on
+the other half of the word register it belongs to.
 
-TODO: Restrict this in a better way.
+>                  | LDBI HalfRegister Byte         -- Load byte immediate
 
->                  | LDBI Register Byte
+Commonly we'll want to load small values into registers.  It would be an
+unnecessary burden if we need to execute 2 instructions to do this.  For this
+case, let's create the LDI instruction which sets the low byte of a register
+to the specified value and the high byte to 0.
 
-Next, let's tackle copying values between registers.  We can copy values
-between any two registers.  If a word register is copied to a byte register,
-the top byte is dropped.  If a byte register is copied to a word register, the
-top byte is set to 0.
+TODO: Sign-extend the low byte into the high byte instead?
 
->                  | LD Register Register
+>                  | LDI Register Byte              -- Load immediate
 
-Borrowing DCPU-16's instruction format, bbbbbbaaaaaaoooo.  That is, a 4-bit
-opcode and two 6-bit operands.
+Another fundamental operation on registers is copying between them.  Let's
+allow this for both full and half registers.
 
-> data Op = EXT ExtOp               -- 0x0, extended instruction
->         | SET Operand Operand     -- 0x1, set a = b
->         | ADD Operand Operand     -- 0x2, set a = a + b, sets carry flag
->         | SUB Operand Operand     -- 0x3, set a = a - b, sets carry flag
->         | MUL Operand Operand     -- 0x4, set a = a * b, sets carry flag
->         | SHL Operand Operand     -- 0x5, set a = a << b, sets carry flag
->         | SHR Operand Operand     -- 0x6, set a = a >> b, sets carry flag
->         | AND Operand Operand     -- 0x7, set a = a & b
->         | BOR Operand Operand     -- 0x8, set a = a | b
->         | XOR Operand Operand     -- 0x9, set a = a ^ b
->         | DATA Word               -- a raw 16-bit integer
->         deriving (Show)
+>                  | LD Register Register           -- Load
+>                  | LDB HalfRegister HalfRegister  -- Load byte
 
-To achieve a larger range of available opcodes, the "extended" opcodes are
-signified by a "basic" opcode of 0x0.  Extended operations also follow the
-DCPU-16 format, aaaaaaoooooo0000.  That is, a 6-bit opcode and a single 6-bit
-operand.
+Getting things to and from the stack is going to be common, so here are some
+instructions for communicating between the stack and a register.  The stack
+extends downwards.
 
-> data ExtOp = ExtReserved          -- 0x00, reserved for extra-extended opcodes
->            | LOAD Operand         -- 0x01, set a = next word
->            | PUSH Operand         -- 0x02, set [SP++] = a
->            | POP Operand          -- 0x03, set a = [--SP]
->            | PEEK Operand         -- 0x04, set a = [SP]
->            deriving (Show)
+>                  | PUSH Register                  -- [--SP] = r
+>                  | POP Register                   -- r = [SP++]
+>                  | PEEK Register                  -- r = [SP]
 
-Operands need to provide several different methods for playing with data.  We
-have 6 bits to play with.  If we want a reasonable number of registers (16),
-that leaves us 2 bits for addressing mode.
+Next let's have some arithmetic.  I've decided to use two-operand arithmetic,
+where the first operand is always overwritten with the result.  All arithmetic
+operations are on two word registers.  Because a lot of arithmetic works with
+smallish changes, most of these have an "immediate" version which operates on
+a register and a supplied byte, and is signified by an appended "I".
 
-> data Operand = Lit Word           -- 00xxxx: short literals (-8 to +7)
->              | Reg Register       -- 01xxxx: r = register r
->              | Frame Register     -- 10xxxx: $r = memory location [FP + r]
->              | Addr Register      -- 11xxxx: @r = memory location [r]
->              deriving (Show)
+TODO: Add more operators?
 
-Define the binary representations of operands:
+>                  | ADD Register Register          -- Add
+>                  | ADDI Register Byte             -- Add immediate
+>                  | ADDC Register Register         -- Add with carry
+>                  | SUB Register Register          -- Subtract
+>                  | SUBI Register Byte             -- Subtract immediate
+>                  | SUBB Register Register         -- Subtract with borrow
+>                  | NEG Register                   -- Two's complement negation
+>                  | SHL Register Register          -- Shift left
+>                  | SHLI Register Byte             -- Shift left immediate
+>                  | SHR Register Register          -- Shift right
+>                  | SHRI Register Byte             -- Shift right immediate
+>                  | AND Register Register          -- Bitwise AND
+>                  | OR Register Register           -- Bitwise OR
+>                  | XOR Register Register          -- Bitwise XOR
+>                  | NOT Register                   -- One's complement negation
 
-> encodeOperand :: Operand -> Word
-> encodeOperand = encode
->     where
->     combine :: Word -> Word -> Word
->     combine mode a = ((mode .&. 0x3) `shiftL` 4) .|. (a .&. 0xF)
->     encode :: Operand -> Word
->     encode (Lit a)   = combine 0x0 a
->     encode (Reg r)   = combine 0x1 $ fromIntegral $ fromJust $ r `elemIndex` registers
->     encode (Frame r) = combine 0x2 $ fromIntegral $ fromJust $ r `elemIndex` registers
->     encode (Addr r)  = combine 0x3 $ fromIntegral $ fromJust $ r `elemIndex` registers
+TODO: Add more instructions.
 
-Define the binary representation of instructions.  To recap, the basic
-instruction format is bbbbbbaaaaaaoooo.  Extended instructions are
-aaaaaaoooooo0000.  The special case of a "data" operation is just a 16-bit
-literal.
-
-> encodeOp :: Op -> Word
-> encodeOp = encode
->     where
->     combine :: Word -> Word -> Word -> Word
->     combine o a b = (o .&. 0xF) .|. ((a .&. 0x3F) `shiftL` 4) .|. ((b .&. 0x3F) `shiftL` 10)
->     encode :: Op -> Word
->     encode (SET a b) = combine 0x1 (encodeOperand a) (encodeOperand b)
->     encode (ADD a b) = combine 0x2 (encodeOperand a) (encodeOperand b)
->     encode (SUB a b) = combine 0x3 (encodeOperand a) (encodeOperand b)
->     encode (MUL a b) = combine 0x4 (encodeOperand a) (encodeOperand b)
->     encode (SHL a b) = combine 0x5 (encodeOperand a) (encodeOperand b)
->     encode (SHR a b) = combine 0x6 (encodeOperand a) (encodeOperand b)
->     encode (AND a b) = combine 0x7 (encodeOperand a) (encodeOperand b)
->     encode (BOR a b) = combine 0x8 (encodeOperand a) (encodeOperand b)
->     encode (XOR a b) = combine 0x9 (encodeOperand a) (encodeOperand b)
->     encode (DATA a)  = a .&. 0xFFFF
->     encode (EXT (LOAD a)) = combine 0x0 0x01 (encodeOperand a)
->     encode (EXT (PUSH a)) = combine 0x0 0x02 (encodeOperand a)
->     encode (EXT (POP  a)) = combine 0x0 0x03 (encodeOperand a)
->     encode (EXT (PEEK a)) = combine 0x0 0x04 (encodeOperand a)
-
-Decode an operand:
-
-> decodeOperand :: Word -> Operand
-> decodeOperand = decode . split
->     where
->     split :: Word -> (Word, Word)
->     split a = ((a .&. 0x30) `shiftR` 4, a .&. 0xF)
->     decode :: (Word, Word) -> Operand
->     decode (0x0, a) = Lit a
->     decode (0x1, r) = Reg $ registers !! fromIntegral r
->     decode (0x2, r) = Frame $ registers !! fromIntegral r
->     decode (0x3, r) = Addr $ registers !! fromIntegral r
-
-Decode an instruction.  Note that we can't decode data instructions because
-there is nothing to mark them as such.  When reading a binary, we need to make
-sure we handle instructions that are followed by data and read the data in.
-
-> decodeOp :: Word -> Op
-> decodeOp = decode . split
->     where
->     split :: Word -> (Word, Word, Word)
->     split inst = (inst .&. 0xF, (inst `shiftR` 4) .&. 0x3F, (inst `shiftR` 10) .&. 0x3F)
->     decode :: (Word, Word, Word) -> Op
->     decode (0x1, a, b) = SET (decodeOperand a) (decodeOperand b)
->     decode (0x2, a, b) = ADD (decodeOperand a) (decodeOperand b)
->     decode (0x3, a, b) = SUB (decodeOperand a) (decodeOperand b)
->     decode (0x4, a, b) = MUL (decodeOperand a) (decodeOperand b)
->     decode (0x5, a, b) = SHL (decodeOperand a) (decodeOperand b)
->     decode (0x6, a, b) = SHR (decodeOperand a) (decodeOperand b)
->     decode (0x7, a, b) = AND (decodeOperand a) (decodeOperand b)
->     decode (0x8, a, b) = BOR (decodeOperand a) (decodeOperand b)
->     decode (0x9, a, b) = XOR (decodeOperand a) (decodeOperand b)
->     decode (0x0, 0x01, a) = EXT (LOAD (decodeOperand a))
->     decode (0x0, 0x02, a) = EXT (PUSH (decodeOperand a))
->     decode (0x0, 0x03, a) = EXT (POP  (decodeOperand a))
->     decode (0x0, 0x04, a) = EXT (PEEK (decodeOperand a))
+>                  deriving (Eq, Show, Read)
