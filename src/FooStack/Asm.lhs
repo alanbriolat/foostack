@@ -26,9 +26,10 @@ Some things these requirments might suggest:
 > import Data.Word (Word8, Word16)
 > import Data.Binary.Put (putWord16be, Put, runPut)
 > import Data.ByteString.Lazy (ByteString)
-> import Data.Bits ((.|.), (.&.), shiftL, shiftR)
+> import Data.Bits (Bits, (.|.), (.&.), shiftL, shiftR)
 > import Data.List (elemIndex)
 > import Data.Maybe (fromJust)
+> import Data.Monoid
 
 
 THE BASICS
@@ -122,7 +123,7 @@ having used the Z80/Z180.
 TODO: There should probably be more registers, I'm sure I'll probably come up
 with some at a later date.
 
->               deriving (Eq, Show, Read)
+>               deriving (Eq, Enum, Show, Read)
 
 I mentioned that the general-purpose registers were somewhat like those in the
 8086.  What I meant is that I think the ability to work with individual bytes is
@@ -134,8 +135,7 @@ as many as half of our word registers can be used as pairs of byte registers.
 >                   | BH | BL
 >                   | CH | CL
 >                   | DH | DL
->                   deriving (Eq, Show, Read)
-
+>                   deriving (Eq, Enum, Show, Read)
 
 
 THE INSTRUCTION SET
@@ -197,6 +197,8 @@ a register and a supplied byte, and is signified by an appended "I".
 
 TODO: Add more operators?
 
+First we have basic addition, subtraction and negation.
+
 >                  | ADD Register Register          -- Add
 >                  | ADDI Register Byte             -- Add immediate
 >                  | ADDC Register Register         -- Add with carry
@@ -204,15 +206,119 @@ TODO: Add more operators?
 >                  | SUBI Register Byte             -- Subtract immediate
 >                  | SUBB Register Register         -- Subtract with borrow
 >                  | NEG Register                   -- Two's complement negation
->                  | SHL Register Register          -- Shift left
->                  | SHLI Register Byte             -- Shift left immediate
->                  | SHR Register Register          -- Shift right
->                  | SHRI Register Byte             -- Shift right immediate
+
+Next we have bitwise combination operations.
+
 >                  | AND Register Register          -- Bitwise AND
 >                  | OR Register Register           -- Bitwise OR
 >                  | XOR Register Register          -- Bitwise XOR
 >                  | NOT Register                   -- One's complement negation
 
+Shift left and shift right are very useful.  SHx is unigned shift, SSx is
+signed/arithmetic shift.
+
+>                  | SHL Register Register          -- Shift left
+>                  | SHLI Register Byte             -- Shift left immediate
+>                  | SHR Register Register          -- Shift right
+>                  | SHRI Register Byte             -- Shift right immediate
+>                  | SSL Register Register          -- Signed shift left
+>                  | SSLI Register Byte             -- Signed shift left immediate
+>                  | SSR Register Register          -- Signed shift right
+>                  | SSRI Register Byte             -- Signed shift right immediate
+
+We're going to have a hard time implementing control flow without any kind of
+jump.  Firstly let's add absolute and relative jumps.  Relative jump values can
+be positive or negative.  Relative jumps are relative to the current
+instruction, not PC + 1.
+
+>                  | JMP Register                   -- Jump, PC = r
+>                  | JR Register                    -- Jump relative, PC += r
+
+Local relative jumps are extremely common, so we should support them in the
+instruction set with an "immediate" version.
+
+>                  | JRI Byte                       -- Jump relative immediate
+
+Conditional jumps are also essential.  For now let's create some very simple
+conditional jumps, the "jump if not zero" kind.
+
+>                  | JMPNZ Register     -- Jump if not zero
+>                  | JRNZ Register      -- Jump relative if not zero
+>                  | JRINZ Byte         -- Jump relative immediate if not zero
+
 TODO: Add more instructions.
 
 >                  deriving (Eq, Show, Read)
+
+
+ENCODING
+========
+
+Everything we have defined so far needs to be able to be packed into 16-bit
+instruction words.  Packing is going to require handling partial words, so
+let's create a type to deal with that.  Partial words are (Chunk n x) where n
+is the bit width of the chunk and x is the value.
+
+> data Chunk = Chunk Int Word deriving (Eq, Show)
+> fromChunk :: Chunk -> Word
+> fromChunk (Chunk _ x) = x
+
+Chunks can be appended together into a bigger chunk - this is how we build the
+instruction word.  Appending chunks is an associative operation, and it also
+has an identity value - the empty chunk.  It's a monoid!
+
+> instance Monoid Chunk where
+>     mempty = Chunk 0 0
+>     mappend (Chunk xn x) (Chunk yn y) = Chunk (xn + yn) ((x `shiftL` yn) .|. y)
+
+We need a nice way of encoding these abstract things.  How about creating a
+typeclass for things that can be encoded.
+
+> class Encodable a where
+>     encode :: a -> Chunk
+>     decode :: Chunk -> a
+
+And now we can define how to encode things.  Register and half-register
+references are easy, because they derive Enum.  It's worth bearing in mind that
+the use of Enum means we can only ever append new register names if we want old
+binaries to still work.
+
+> instance Encodable Register where
+>     encode = Chunk 4 . fromIntegral . fromEnum
+>     decode = toEnum  . fromIntegral . fromChunk
+
+> instance Encodable HalfRegister where
+>     encode = Chunk 4 . fromIntegral . fromEnum
+>     decode = toEnum  . fromIntegral . fromChunk
+
+Encoding bytes is even easier!
+
+> instance Encodable Word8 where
+>     encode = Chunk 8 . fromIntegral
+>     decode = fromIntegral . fromChunk
+
+And now for the big part, encoding instructions...
+
+> instance Encodable Instruction where
+>     encode (LDI r b) = mconcat [Chunk 4 0x1, encode r, encode b]
+>     -- TODO: this is a dummy setting everything unknown to HALT
+>     encode _ = Chunk 16 0
+>     -- TODO: this is a dummy setting everything unknown to HALT
+>     decode _ = HALT
+
+
+Judging by the above instructions, and earlier discussion
+of the instruction encoding we have a limited number of packing patterns, and
+they all seem to be based on 4-bit chunks.  Certain opcode values can signify
+that there is an "extended" opcode nested inside, and the whole thing forms a
+tree of possible encodings.
+
+   |-- 0000
+   |    |-- 0000
+   |    |    |-- 0000
+   |    |    |    `-- oooo
+   |    |    `-- oooo rrrr
+   |    |-- oooo rrrr rrrr
+   |    `-- oooo iiiiiiii
+   `-- oooo
+        `-- rrrr iiiiiiii
