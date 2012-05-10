@@ -21,6 +21,8 @@ Some things these requirments might suggest:
 >     Register(..),
 >     HalfRegister(..),
 >     Instruction(..),
+>     encode,
+>     decode,
 >     ) where
 
 > import Data.Word (Word8, Word16)
@@ -260,8 +262,17 @@ let's create a type to deal with that.  Partial words are (Chunk n x) where n
 is the bit width of the chunk and x is the value.
 
 > data Chunk = Chunk Int Word deriving (Eq, Show)
+
+We also have a masking function to set all irrelevant bits - those above the
+extent of the chunk - to 0.
+
+> mask :: Int -> Word -> Word
+> mask n x = (2^n-1) .&. x
+
+A function to extract the value from a Chunk.
+
 > fromChunk :: Chunk -> Word
-> fromChunk (Chunk _ x) = x
+> fromChunk (Chunk n x) = mask n x
 
 Chunks can be appended together into a bigger chunk - this is how we build the
 instruction word.  Appending chunks is an associative operation, and it also
@@ -269,7 +280,22 @@ has an identity value - the empty chunk.  It's a monoid!
 
 > instance Monoid Chunk where
 >     mempty = Chunk 0 0
->     mappend (Chunk xn x) (Chunk yn y) = Chunk (xn + yn) ((x `shiftL` yn) .|. y)
+>     mappend (Chunk nx x) (Chunk ny y) = Chunk n xy
+>         where
+>         n = nx + ny
+>         xy = (x `shiftL` ny) .|. (mask ny y)
+
+We also need to be able to cut chunks up again.  The number of bits is counted
+from the MSB of the *Chunk*, not the underlying word.
+
+> splitChunkAt :: Int -> Chunk -> (Chunk, Chunk)
+> splitChunkAt n (Chunk nxy xy)
+>     | n >= 0 && n <= nxy = let nx = n
+>                                ny = nxy - n
+>                                x = mask nx $ xy `shiftR` ny
+>                                y = mask ny xy
+>                            in  (Chunk nx x, Chunk ny y)
+>     | otherwise          = undefined
 
 We need a nice way of encoding these abstract things.  How about creating a
 typeclass for things that can be encoded.
@@ -297,28 +323,100 @@ Encoding bytes is even easier!
 >     encode = Chunk 8 . fromIntegral
 >     decode = fromIntegral . fromChunk
 
-And now for the big part, encoding instructions...
+And now for the big part, encoding instructions.  Let's keep the Encodable
+instance simple, because the implementation is going to be quite big.
 
 > instance Encodable Instruction where
->     encode (LDI r b) = mconcat [Chunk 4 0x1, encode r, encode b]
->     -- TODO: this is a dummy setting everything unknown to HALT
->     encode _ = Chunk 16 0
->     -- TODO: this is a dummy setting everything unknown to HALT
->     decode _ = HALT
+>     encode = encodeInstruction
+>     decode = decodeInstruction
 
+The implementation of instruction encoding.
 
-Judging by the above instructions, and earlier discussion
-of the instruction encoding we have a limited number of packing patterns, and
-they all seem to be based on 4-bit chunks.  Certain opcode values can signify
-that there is an "extended" opcode nested inside, and the whole thing forms a
-tree of possible encodings.
+> encodeInstruction :: Instruction -> Chunk
+> -- (register, immediate) instructions, only 4 bits for opcode
+> encodeInstruction (LDBI r b)   = mconcat [Chunk 4 0x0, encode r, encode b]
+> encodeInstruction (LDI r b)    = mconcat [Chunk 4 0x1, encode r, encode b]
+> encodeInstruction (ADDI r b)   = mconcat [Chunk 4 0x2, encode r, encode b]
+> encodeInstruction (SUBI r b)   = mconcat [Chunk 4 0x3, encode r, encode b]
+> encodeInstruction (SHLI r b)   = mconcat [Chunk 4 0x4, encode r, encode b]
+> encodeInstruction (SHRI r b)   = mconcat [Chunk 4 0x5, encode r, encode b]
+> encodeInstruction (SSLI r b)   = mconcat [Chunk 4 0x6, encode r, encode b]
+> encodeInstruction (SSRI r b)   = mconcat [Chunk 4 0x7, encode r, encode b]
+> -- (register, register) instructions, 8-bit opcode, extend unused 4-bit
+> encodeInstruction (LD ra rb)   = mconcat [Chunk 8 0xF0, encode ra, encode rb]
+> encodeInstruction (LDB ra rb)  = mconcat [Chunk 8 0xF1, encode ra, encode rb]
+> encodeInstruction (ADD ra rb)  = mconcat [Chunk 8 0xF2, encode ra, encode rb]
+> encodeInstruction (ADDC ra rb) = mconcat [Chunk 8 0xF3, encode ra, encode rb]
+> encodeInstruction (SUB ra rb)  = mconcat [Chunk 8 0xF4, encode ra, encode rb]
+> encodeInstruction (SUBB ra rb) = mconcat [Chunk 8 0xF5, encode ra, encode rb]
+> encodeInstruction (AND ra rb)  = mconcat [Chunk 8 0xF6, encode ra, encode rb]
+> encodeInstruction (OR ra rb)   = mconcat [Chunk 8 0xF7, encode ra, encode rb]
+> encodeInstruction (XOR ra rb)  = mconcat [Chunk 8 0xF8, encode ra, encode rb]
+> encodeInstruction (SHL ra rb)  = mconcat [Chunk 8 0xF9, encode ra, encode rb]
+> encodeInstruction (SHR ra rb)  = mconcat [Chunk 8 0xFA, encode ra, encode rb]
+> encodeInstruction (SSL ra rb)  = mconcat [Chunk 8 0xFB, encode ra, encode rb]
+> encodeInstruction (SSR ra rb)  = mconcat [Chunk 8 0xFC, encode ra, encode rb]
+> -- (immediate) instructions, 8-bit opcode, extend unused 4-bit
+> encodeInstruction (JRI b)      = mconcat [Chunk 8 0xE0, encode b]
+> encodeInstruction (JRINZ b)    = mconcat [Chunk 8 0xE1, encode b]
+> -- (register) instructions, 12-bit opcode, extend unused 8-bit
+> encodeInstruction (PUSH r)     = mconcat [Chunk 12 0xFF0, encode r]
+> encodeInstruction (POP r)      = mconcat [Chunk 12 0xFF1, encode r]
+> encodeInstruction (PEEK r)     = mconcat [Chunk 12 0xFF2, encode r]
+> encodeInstruction (NEG r)      = mconcat [Chunk 12 0xFF3, encode r]
+> encodeInstruction (NOT r)      = mconcat [Chunk 12 0xFF4, encode r]
+> encodeInstruction (JMP r)      = mconcat [Chunk 12 0xFF5, encode r]
+> encodeInstruction (JR r)       = mconcat [Chunk 12 0xFF6, encode r]
+> encodeInstruction (JMPNZ r)    = mconcat [Chunk 12 0xFF7, encode r]
+> encodeInstruction (JRNZ r)     = mconcat [Chunk 12 0xFF8, encode r]
+> -- instructions with no operand, 16-bit opcode, extend unused 12-bit
+> encodeInstruction (HALT)       = Chunk 16 0xFFFF
 
-   |-- 0000
-   |    |-- 0000
-   |    |    |-- 0000
-   |    |    |    `-- oooo
-   |    |    `-- oooo rrrr
-   |    |-- oooo rrrr rrrr
-   |    `-- oooo iiiiiiii
-   `-- oooo
-        `-- rrrr iiiiiiii
+The implementation of instruction decoding.
+
+> decodeInstruction :: Chunk -> Instruction
+> decodeInstruction = uncurry decode4 . splitChunkAt 4
+> decodeArity2 :: (Encodable a, Encodable b) =>
+>                 Int -> (a -> b -> Instruction) -> Chunk -> Instruction
+> decodeArity2 n i c = let (a, b) = splitChunkAt n c
+>                      in  i (decode a) (decode b)
+> decode4 :: Chunk -> Chunk -> Instruction
+> decode4 (Chunk 4 0x0)      = decodeArity2 4 LDBI
+> decode4 (Chunk 4 0x1)      = decodeArity2 4 LDI
+> decode4 (Chunk 4 0x2)      = decodeArity2 4 ADDI
+> decode4 (Chunk 4 0x3)      = decodeArity2 4 SUBI
+> decode4 (Chunk 4 0x4)      = decodeArity2 4 SHLI
+> decode4 (Chunk 4 0x5)      = decodeArity2 4 SHRI
+> decode4 (Chunk 4 0x6)      = decodeArity2 4 SSLI
+> decode4 (Chunk 4 0x7)      = decodeArity2 4 SSRI
+> decode4 opcode             = uncurry (decode8 . mappend opcode) . splitChunkAt 4
+> decode8 :: Chunk -> Chunk -> Instruction
+> decode8 (Chunk 8 0xF0)     = decodeArity2 4 LD
+> decode8 (Chunk 8 0xF1)     = decodeArity2 4 LDB
+> decode8 (Chunk 8 0xF2)     = decodeArity2 4 ADD
+> decode8 (Chunk 8 0xF3)     = decodeArity2 4 ADDC
+> decode8 (Chunk 8 0xF4)     = decodeArity2 4 SUB
+> decode8 (Chunk 8 0xF5)     = decodeArity2 4 SUBB
+> decode8 (Chunk 8 0xF6)     = decodeArity2 4 AND
+> decode8 (Chunk 8 0xF7)     = decodeArity2 4 OR
+> decode8 (Chunk 8 0xF8)     = decodeArity2 4 XOR
+> decode8 (Chunk 8 0xF9)     = decodeArity2 4 SHL
+> decode8 (Chunk 8 0xFA)     = decodeArity2 4 SHR
+> decode8 (Chunk 8 0xFB)     = decodeArity2 4 SSL
+> decode8 (Chunk 8 0xFC)     = decodeArity2 4 SSR
+> decode8 (Chunk 8 0xE0)     = JRI . decode
+> decode8 (Chunk 8 0xE1)     = JRINZ . decode
+> decode8 opcode             = uncurry (decode12 . mappend opcode) . splitChunkAt 4
+> decode12 :: Chunk -> Chunk -> Instruction
+> decode12 (Chunk 12 0xFF0)  = PUSH . decode
+> decode12 (Chunk 12 0xFF1)  = POP . decode
+> decode12 (Chunk 12 0xFF2)  = PEEK . decode
+> decode12 (Chunk 12 0xFF3)  = NEG . decode
+> decode12 (Chunk 12 0xFF4)  = NOT . decode
+> decode12 (Chunk 12 0xFF5)  = JMP . decode
+> decode12 (Chunk 12 0xFF6)  = JR . decode
+> decode12 (Chunk 12 0xFF7)  = JMPNZ . decode
+> decode12 (Chunk 12 0xFF8)  = JRNZ . decode
+> decode12 opcode            = decode16 . mappend opcode
+> decode16 :: Chunk -> Instruction
+> decode16 (Chunk 16 0xFFFF) = HALT
