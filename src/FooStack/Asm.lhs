@@ -420,3 +420,11 @@ bits and tries to decode again
 
 > decodeInstruction (Chunk 16 _) = undefined
 > decodeInstruction opcode = uncurry (decodeInstruction . mappend opcode) . splitChunkAt 4
+
+
+> data Codec a = Codec { encoder :: a -> Chunk
+>                      , decoder :: Chunk -> a
+>                      }
+>
+> class HasCodec a where
+>     codec :: a -> Codec a
