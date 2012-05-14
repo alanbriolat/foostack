@@ -328,7 +328,7 @@ instance simple, because the implementation is going to be quite big.
 
 > instance Encodable Instruction where
 >     encode = encodeInstruction
->     decode = decodeInstruction
+>     decode = uncurry decodeInstruction . splitChunkAt 4
 
 The implementation of instruction encoding.
 
@@ -374,49 +374,49 @@ The implementation of instruction encoding.
 
 The implementation of instruction decoding.
 
-> decodeInstruction :: Chunk -> Instruction
-> decodeInstruction = uncurry decode4 . splitChunkAt 4
 > decodeArity2 :: (Encodable a, Encodable b) =>
 >                 Int -> (a -> b -> Instruction) -> Chunk -> Instruction
 > decodeArity2 n i c = let (a, b) = splitChunkAt n c
 >                      in  i (decode a) (decode b)
-> decode4 :: Chunk -> Chunk -> Instruction
-> decode4 (Chunk 4 0x0)      = decodeArity2 4 LDBI
-> decode4 (Chunk 4 0x1)      = decodeArity2 4 LDI
-> decode4 (Chunk 4 0x2)      = decodeArity2 4 ADDI
-> decode4 (Chunk 4 0x3)      = decodeArity2 4 SUBI
-> decode4 (Chunk 4 0x4)      = decodeArity2 4 SHLI
-> decode4 (Chunk 4 0x5)      = decodeArity2 4 SHRI
-> decode4 (Chunk 4 0x6)      = decodeArity2 4 SSLI
-> decode4 (Chunk 4 0x7)      = decodeArity2 4 SSRI
-> decode4 opcode             = uncurry (decode8 . mappend opcode) . splitChunkAt 4
-> decode8 :: Chunk -> Chunk -> Instruction
-> decode8 (Chunk 8 0xF0)     = decodeArity2 4 LD
-> decode8 (Chunk 8 0xF1)     = decodeArity2 4 LDB
-> decode8 (Chunk 8 0xF2)     = decodeArity2 4 ADD
-> decode8 (Chunk 8 0xF3)     = decodeArity2 4 ADDC
-> decode8 (Chunk 8 0xF4)     = decodeArity2 4 SUB
-> decode8 (Chunk 8 0xF5)     = decodeArity2 4 SUBB
-> decode8 (Chunk 8 0xF6)     = decodeArity2 4 AND
-> decode8 (Chunk 8 0xF7)     = decodeArity2 4 OR
-> decode8 (Chunk 8 0xF8)     = decodeArity2 4 XOR
-> decode8 (Chunk 8 0xF9)     = decodeArity2 4 SHL
-> decode8 (Chunk 8 0xFA)     = decodeArity2 4 SHR
-> decode8 (Chunk 8 0xFB)     = decodeArity2 4 SSL
-> decode8 (Chunk 8 0xFC)     = decodeArity2 4 SSR
-> decode8 (Chunk 8 0xE0)     = JRI . decode
-> decode8 (Chunk 8 0xE1)     = JRINZ . decode
-> decode8 opcode             = uncurry (decode12 . mappend opcode) . splitChunkAt 4
-> decode12 :: Chunk -> Chunk -> Instruction
-> decode12 (Chunk 12 0xFF0)  = PUSH . decode
-> decode12 (Chunk 12 0xFF1)  = POP . decode
-> decode12 (Chunk 12 0xFF2)  = PEEK . decode
-> decode12 (Chunk 12 0xFF3)  = NEG . decode
-> decode12 (Chunk 12 0xFF4)  = NOT . decode
-> decode12 (Chunk 12 0xFF5)  = JMP . decode
-> decode12 (Chunk 12 0xFF6)  = JR . decode
-> decode12 (Chunk 12 0xFF7)  = JMPNZ . decode
-> decode12 (Chunk 12 0xFF8)  = JRNZ . decode
-> decode12 opcode            = decode16 . mappend opcode
-> decode16 :: Chunk -> Instruction
-> decode16 (Chunk 16 0xFFFF) = HALT
+> decodeInstruction :: Chunk -> Chunk -> Instruction
+> decodeInstruction (Chunk 4 0x0)      = decodeArity2 4 LDBI
+> decodeInstruction (Chunk 4 0x1)      = decodeArity2 4 LDI
+> decodeInstruction (Chunk 4 0x2)      = decodeArity2 4 ADDI
+> decodeInstruction (Chunk 4 0x3)      = decodeArity2 4 SUBI
+> decodeInstruction (Chunk 4 0x4)      = decodeArity2 4 SHLI
+> decodeInstruction (Chunk 4 0x5)      = decodeArity2 4 SHRI
+> decodeInstruction (Chunk 4 0x6)      = decodeArity2 4 SSLI
+> decodeInstruction (Chunk 4 0x7)      = decodeArity2 4 SSRI
+> decodeInstruction (Chunk 8 0xF0)     = decodeArity2 4 LD
+> decodeInstruction (Chunk 8 0xF1)     = decodeArity2 4 LDB
+> decodeInstruction (Chunk 8 0xF2)     = decodeArity2 4 ADD
+> decodeInstruction (Chunk 8 0xF3)     = decodeArity2 4 ADDC
+> decodeInstruction (Chunk 8 0xF4)     = decodeArity2 4 SUB
+> decodeInstruction (Chunk 8 0xF5)     = decodeArity2 4 SUBB
+> decodeInstruction (Chunk 8 0xF6)     = decodeArity2 4 AND
+> decodeInstruction (Chunk 8 0xF7)     = decodeArity2 4 OR
+> decodeInstruction (Chunk 8 0xF8)     = decodeArity2 4 XOR
+> decodeInstruction (Chunk 8 0xF9)     = decodeArity2 4 SHL
+> decodeInstruction (Chunk 8 0xFA)     = decodeArity2 4 SHR
+> decodeInstruction (Chunk 8 0xFB)     = decodeArity2 4 SSL
+> decodeInstruction (Chunk 8 0xFC)     = decodeArity2 4 SSR
+> decodeInstruction (Chunk 8 0xE0)     = JRI . decode
+> decodeInstruction (Chunk 8 0xE1)     = JRINZ . decode
+> decodeInstruction (Chunk 12 0xFF0)   = PUSH . decode
+> decodeInstruction (Chunk 12 0xFF1)   = POP . decode
+> decodeInstruction (Chunk 12 0xFF2)   = PEEK . decode
+> decodeInstruction (Chunk 12 0xFF3)   = NEG . decode
+> decodeInstruction (Chunk 12 0xFF4)   = NOT . decode
+> decodeInstruction (Chunk 12 0xFF5)   = JMP . decode
+> decodeInstruction (Chunk 12 0xFF6)   = JR . decode
+> decodeInstruction (Chunk 12 0xFF7)   = JMPNZ . decode
+> decodeInstruction (Chunk 12 0xFF8)   = JRNZ . decode
+> decodeInstruction (Chunk 16 0xFFFF)  = const HALT
+
+This little bit handles searching for increasingly long opcodes.  The first is
+a "base case" where an unknown 16-bit opcode really does mean an unknown
+instruction.  The second basically moves the opcode/operand split along by 4
+bits and tries to decode again
+
+> decodeInstruction (Chunk 16 _) = undefined
+> decodeInstruction opcode = uncurry (decodeInstruction . mappend opcode) . splitChunkAt 4
